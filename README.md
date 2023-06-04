@@ -1,2 +1,2 @@
-# nonces-db-processing
-Processing tools for databases used in the nonces project
+# nonces
+External databases, processing tools, fingerprinting results, etc
