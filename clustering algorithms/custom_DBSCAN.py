@@ -8,11 +8,14 @@ from bayes_opt import BayesianOptimization
 import matplotlib.pyplot as plt
 import numpy as np
 from fuzzywuzzy import fuzz
+from scipy.sparse import csr_matrix
+
+number = 1
 
 # Read the JSONL file
-input_file = '/Users/ihyunnam/Desktop/hs_test_100.json'
-output_file_domain = '/Users/ihyunnam/Desktop/DBSCANlocal/dbscan_custom_dist_domain2.json'
-output_file_clients = '/Users/ihyunnam/Desktop/DBSCANlocal/dbscan_custom_dist_client2.json'
+input_file = '/home/ihyun/sni/hs_test_2000.json'
+output_file_domain = "/home/ihyun/sni_sd_trials/dbscan_custom_domain_{:.2f}.json".format(number)
+output_file_clients = "/home/ihyun/sni_sd_trials/dbscan_custom_client_{:.2f}.json".format(number)
 
 # one copy for each appearance
 domains = []
@@ -31,7 +34,6 @@ with open(input_file, 'r') as file:
             domain = fp['handshake']['client_hello']['server_name']
             domains_flat.append(domain)
             temp.append(domain)
-            # if domain not in domains:
             domains.append(temp)
 
             # accounting for missing data
@@ -72,14 +74,13 @@ with open(input_file, 'r') as file:
 
             client = tcp_header_length + ip_ttl + tcp_window_size + tcp_flags + tcp_mss + tcp_options + tcp_window_scaling
 
-            # if client not in clients:
-            # clients and server_name index must be the same
             clients['fp'].append(client)
             server_name = fp['handshake']['client_hello']['server_name']
             clients['server_name'].append(server_name)
 
-################################## compute distance between two SNIs ##################################
+################################## intelligently compute distance between domain names, used for Bayesian optimization AND actual clustering ##################################
 
+# compute distance between two SNIs
 def custom_distance(x, y):
     if x[:4] == 'www.':
         x=x[4:]
@@ -94,82 +95,78 @@ def custom_distance(x, y):
     shorter = min(x_len, y_len)
 
     for index in range(shorter):
-        # exact matching for top level domain (TLD)
+        # for TLD (e.g. netflix.com) needs exact matching
         if index <2:
             if x_indices[x_len-index-1] != y_indices[y_len-index-1]:
                 if index == 0:
                     distance += 1/3 # arbitrary low weight for TLD (top level domain)
                 else:
                     distance += 1/index  # assign more weight to the end of the string
-        # similarity score for paths less than TLD
+        # for paths less than TLD, check for inclusion e.g. profiles.stanford.edu and profiles-02.stanford.edu in same cluster
         else:
             similarity_score = fuzz.ratio(x_indices[x_len-index-1], y_indices[y_len-index-1])
             distance += (1-0.01*similarity_score) * 1/index
     return distance
 
-################################## compute edge weights ##################################
+################################## compute weight of edges, used for generating bipartite graph ##################################
 
+# normalize by taking avg of everything
 # given an domain cluster and a client clustser, compute the weight of edge between them
-# weight: reversely proportional to non_exclusivity and proportional to frequency
-
 def compute_weight(domain_cluster, client_cluster):
-    frequency = 0
-    for index, row in client_cluster.iterrows():
-        client_sni = row['server_name']
-        for index, row1 in domain_cluster.iterrows():
-            if client_sni == row1['client_ip']:
-                frequency = frequency+ 1
-
+    # avg. number of times each client was connected to a domain in domain_cluster (sum/number of client)
     total_num_clients = len(client_cluster)
     total_num_domain = len(domain_cluster)
 
+    frequency = 0
+    for index, row in client_cluster.iterrows():
+        for index, row1 in domain_cluster.iterrows():
+            if row['server_name'] == row1['domain']:
+                frequency += 1
+                break
+
     frequency = frequency/total_num_clients
-    print("frequency " + str(frequency))
 
-    # TODO: counterintuitive, change name
-    non_exclusivity = 0
-    for index, row in domain_cluster.iterrows():
-        print("domain " + str(row))
-        in_others_count = domains.count(row['client_ip'])
-        in_C_count = 0
-        for index, row in client_cluster.iterrows():
-            if row['server_name'] == row['client_ip']:
-                in_C_count += 1
-        non_exclusivity += (in_others_count - in_C_count)
+    non_exclusivity = total_num_domain
+    for index, row in client_cluster.iterrows():
+        for index, row1 in domain_cluster.iterrows():
+            if row['server_name'] == row1['domain']:
+                non_exclusivity -= 1
+                break
 
-    non_exclusivity = non_exclusivity/total_num_domain+1
+    non_exclusivity = (non_exclusivity+0.5)/total_num_domain
 
+    # TODO: come up with name
     weight = frequency/non_exclusivity
     return np.float64(weight)
 
 vectorizer = TfidfVectorizer()
 X = vectorizer.fit_transform(domains_flat)
 Y = vectorizer.fit_transform(clients['fp'])
+
 count_good_clusters = 0
 
 ################################## compute distance matrix ##################################
 
 dimension = len(domains_flat)
-distance_matrix = np.empty((dimension, dimension))
+distance_data = []
 
 for x in range(dimension):
     for y in range(dimension):
-        distance_matrix[x][y] = custom_distance(domains_flat[x], domains_flat[y])
+        distance = custom_distance(domains_flat[x], domains_flat[y])
+        distance_data.append((x, y, distance))
 
-# divide by maximum entry in distance_matrix to normalize distances
-max = 0
-for x in range(dimension):
-    for y in range(dimension):
-        if distance_matrix[x][y] > 0:
-            max = distance_matrix[x][y]
+# Build the sparse distance matrix using coo_matrix
+rows, cols, distances = zip(*distance_data)
+distance_matrix = csr_matrix((distances, (rows, cols)), shape=(dimension, dimension))
 
-if max != 0:
-    for x in range(dimension):
-        for y in range(dimension):
-            distance_matrix[x][y] = distance_matrix[x][y]/max
+# Divide by maximum entry in distance_matrix to normalize distances
+max_distance = distance_matrix.max()
+if max_distance != 0:
+    distance_matrix /= max_distance
 
-################################## objective function for Bayesian optimization ##################################
+################################## evaluate clusters, used for Bayesian optimization ##################################
 
+all_good_clusters = []
 # NOTE: eps for domain and clients can be different
 def evaluate_clusters(eps_domain, eps_client):
     dbscan_domain = DBSCAN(eps=eps_domain, min_samples=1).fit(X)
@@ -178,76 +175,73 @@ def evaluate_clusters(eps_domain, eps_client):
     dbscan_client = DBSCAN(eps=eps_client, min_samples=1).fit(Y)
     client_labels = dbscan_client.labels_
 
-    df_domain = pd.DataFrame({'client_ip': domains_flat, 'cluster_label': domain_labels})
+    df_domain = pd.DataFrame({'domain': domains_flat, 'cluster_label': domain_labels})
     df_clients = pd.DataFrame({'client_ip': clients['fp'], 'server_name': clients['server_name'], 'cluster_label': client_labels})
 
-    # create bipartite graph
-    G = nx.Graph()
-    bipartite.is_bipartite(G)
-  
-    G.add_nodes_from(domain_labels, bipartite=0)
-    G.add_nodes_from(client_labels, bipartite=1)
-
-    # add edges to G
     edge_list = []
+    # add edges
     for client in np.unique(client_labels):
         for domain in np.unique(domain_labels):
-            unique_len_d = len(np.unique(df_domain[df_domain['cluster_label'] == str(domain)]))
             weight = compute_weight(df_domain[df_domain['cluster_label'] == domain], df_clients[df_clients['cluster_label'] == client])
             edge_list.append((domain, client, weight))
-    
-    G.add_weighted_edges_from([(u, v, {'weight': w}) for u, v, w in edge_list])
 
     count_good_clusters = 0
 
-    # identify and count 'good' client clusters
+    # loop through all client clusters (identified by cluster label)
     for item in np.unique(client_labels):
-        good = False
         sd_list = []
         for edge in edge_list:
-            if edge[1] == item:
+            # only consider non-zero weights
+            if edge[1] == item and edge[2] != 0:
                 sd_list.append(edge[2])
-        sd_list = sorted(sd_list, reverse = True)
         
-        # up to three is okay
-        for count in range(3):
-            sd_list_rest = sd_list[count+1:]
-            sd = np.std(sd_list_rest)
-            if count > 0:
-                if sd_list[count] - sd_list[count-1] < sd:
-                    if np.min(sd_list[:count+1]) > sd + np.max(sd_list_rest):
-                        good = True
-                        break
-        if good == True:
-            count_good_clusters += 1
-          
-    return count_good_clusters 
+        # skip if all weights are zero
+        if len(sd_list) == 0:
+            continue
 
-################################## Bayesian optimization to find optimal eps ##################################
+        if len(sd_list) == 1:
+            count_good_clusters += 1
+            continue
+
+        # not good if all non-zero weights equal
+        if len(set(sd_list)) == 1:
+            continue
+
+        mean = sum(sd_list)/len(sd_list)
+        sd = np.std(sd_list)
+        if max(sd_list) >= mean + number*sd:
+            count_good_clusters += 1
+
+        # add unique_len_c/d to prevent singletons or large domain clusters
+    return count_good_clusters + (len(np.unique(domain_labels)) + len(domains_flat)/len(np.unique(domain_labels)))/2
+
+################################## Bayesian optimization to find optimal n_clusters ##################################
 
 param_bounds = {'eps_domain': (1e-6, 1),
-                'eps_client': (1e-6, 1)}
+                'eps_client': (1e-6, 1)}  # TODO: What to set as min, max, increment size?
 
+# Create the BayesianOptimization object
 optimizer = BayesianOptimization(f=evaluate_clusters, pbounds=param_bounds)
 optimizer.maximize(n_iter=10)
 
-# Retrieve the inputs that resulted in the highest score
+# Retrieve the input that resulted in the highest score
 best_eps_domain = optimizer.max['params']['eps_domain']
 best_eps_client = optimizer.max['params']['eps_client']
 best_score = optimizer.max['target']
 
-################################## perform DBSCAN clustering with optimal eps ##################################
+################################## perform DBSCAN clustering with optimal n_clusters ##################################
 
+# compute custom distances on raw strings -> relate string domains to vectorized -> .fit(X vectorized)dbsc
 dbscan_domain = DBSCAN(eps=best_eps_domain, min_samples=1, metric='precomputed').fit(distance_matrix)
 domain_labels = dbscan_domain.labels_
 
 dbscan_client = DBSCAN(eps=best_eps_client, min_samples=1).fit(Y)
 client_labels = dbscan_client.labels_
 
-df_domain = pd.DataFrame({'client_ip': domains_flat, 'cluster_label': domain_labels})
+df_domain = pd.DataFrame({'domain': domains_flat, 'cluster_label': domain_labels})
 df_clients = pd.DataFrame({'client_ip': clients['fp'], 'server_name': clients['server_name'], 'cluster_label': client_labels})
 
-# save clustering results in json files
+# save clustering results in json
 df_sorted_domain = df_domain.sort_values('cluster_label')
 with open(output_file_domain, 'w') as output:
     df_sorted_domain.to_json(output_file_domain, orient='records', lines=True)
@@ -258,50 +252,61 @@ with open(output_file_clients, 'w') as output:
 
 ################################## create bipartite graph ##################################
 
-G = nx.Graph()
-bipartite.is_bipartite(G)
-
-G.add_nodes_from(np.unique(domain_labels), bipartite=0)
-G.add_nodes_from(np.unique(client_labels), bipartite=1)
-
-# add edges
 edge_list = []
+
 for domain in np.unique(domain_labels):
     index = 0
     for client in np.unique(client_labels):
         weight = compute_weight(df_domain[df_domain['cluster_label'] == domain], df_clients[df_clients['cluster_label'] == client])
-        if weight == 0:
-            continue
-        print("weight " + str(weight))
         index = index+1
         edge_list.append((domain, client, weight))
-        G.add_weighted_edges_from([(u, v, {'weight': w}) for u, v, w in edge_list])
 
-weights = [G[u][v]['weight'] for u, v in G.edges()]
+max_weight = float('-inf')
 
-pos = nx.drawing.layout.bipartite_layout(G, nodes=np.unique(domain_labels))
-labels = nx.get_edge_attributes(G,'weight')
+# Iterate through edge_list and find the maximum weight
+for u, v, weight in edge_list:
+    if weight > max_weight:
+        max_weight = weight
 
-plt.figure(figsize=(50,50))
-plt.axis('scaled')  # Maintain the aspect ratio
-plt.axis([0, 50, 0, 50])  # Example limits, adjust as needed
-nx.draw_networkx_edge_labels(G, pos=pos, edge_labels=labels)
-plt.show()
-plt.savefig("graph.png")
+count_good_clusters = 0
+all_good_clusters = []
+for item in np.unique(client_labels):
+    sd_list = []
+    for edge in edge_list:
+        # only consider non-zero weights
+        if edge[1] == item and edge[2] != 0:
+            sd_list.append(edge[2])
+    
+    mean = sum(sd_list)/len(sd_list)
+    
+    # skip if all weights are zero
+    if len(sd_list) == 0:
+        continue
+
+    if len(sd_list) == 1:
+        count_good_clusters += 1
+        all_good_clusters.append(item)
+        continue
+
+    # not good if all non-zero weights equal
+    if len(set(sd_list)) == 1:
+        continue
+
+    sd = np.std(sd_list)
+    if max(sd_list) >= mean + number*sd:
+        count_good_clusters += 1
+        all_good_clusters.append(item)
 
 # visualize as table
 edges_data = pd.DataFrame({'Domain': [edge[0] for edge in edge_list],
                            'Client': [edge[1] for edge in edge_list],
-                           'Weight': [edge[2] for edge in edge_list]})
+                           'Weight': [edge[2] for edge in edge_list],
+                           'Weight significance': [edge[2]/max_weight for edge in edge_list]})
 
-# save clustering results in json files
-with open('/Users/ihyunnam/Desktop/DBSCANlocal/bscan_custom_dist_result2.json', 'w') as output:
+data_output = "/home/ihyun/sni_sd_trials/dbscan_custom_result_{:.2f}.json".format(number)
+with open(data_output, 'w') as output:
     edges_data.to_json(data_output, orient='records', lines=True)
 
-with open('/Users/ihyunnam/Desktop/DBSCANlocal/dbscan_custom_dist_info2.json', 'w') as output:
-    output.write(json.dumps("all sd " + str(all_sd)) + '\n')
-    output.write(json.dumps("num good clusters" + str(best_score)) + '\n')
-    for cluster in np.unique(client_labels):
-        for edge in edge_list:
-            if edge[1] == cluster:
-                output.write(json.dumps(str(cluster)+ ":"+str(edge[0])+ "," +str(edge[2])) + '\n')
+with open("/home/ihyun/sni_sd_trials/dbscan_custom_info_{:.2f}.json".format(number), 'w') as output:
+    output.write(json.dumps("num good clusters" + str(count_good_clusters)) + '\n')
+    output.write(json.dumps("all good clusters" + str(all_good_clusters)) + '\n')
