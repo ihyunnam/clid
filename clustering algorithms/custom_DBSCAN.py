@@ -11,11 +11,12 @@ from fuzzywuzzy import fuzz
 from scipy.sparse import csr_matrix
 
 number = 1
+num_highest_allowed = 1
 
 # Read the JSONL file
-input_file = '/home/ihyun/sni/hs_test_2000.json'
-output_file_domain = "/home/ihyun/sni_sd_trials/dbscan_custom_domain_{:.2f}.json".format(number)
-output_file_clients = "/home/ihyun/sni_sd_trials/dbscan_custom_client_{:.2f}.json".format(number)
+input_file = '/Users/ihyunnam/Desktop/hs_test_100.json'
+output_file_domain = "/Users/ihyunnam/Desktop/a_{:.2f}.json".format(number)
+output_file_clients = "/Users/ihyunnam/Desktop/b_{:.2f}.json".format(number)
 
 # one copy for each appearance
 domains = []
@@ -183,34 +184,33 @@ def evaluate_clusters(eps_domain, eps_client):
     for client in np.unique(client_labels):
         for domain in np.unique(domain_labels):
             weight = compute_weight(df_domain[df_domain['cluster_label'] == domain], df_clients[df_clients['cluster_label'] == client])
-            edge_list.append((domain, client, weight))
+            if weight != 0:
+                edge_list.append((domain, client, weight))
 
+    df = pd.DataFrame(edge_list, columns=['Domain', 'Client', 'Weight'])
+
+    # Group by 'client' column
+    client_groups = df.groupby('Client')['Weight']
+
+    # Function to calculate standard deviation and other metrics for each client group
     count_good_clusters = 0
 
-    # loop through all client clusters (identified by cluster label)
-    for item in np.unique(client_labels):
-        sd_list = []
-        for edge in edge_list:
-            # only consider non-zero weights
-            if edge[1] == item and edge[2] != 0:
-                sd_list.append(edge[2])
+    for group, weights in client_groups:
+        if len(weights)<= num_highest_allowed:
+            count_good_clusters += 1
+
+        std_dev = np.std(weights)
+        highest_weight = np.max(weights)
+        mean = np.mean(weights)
         
-        # skip if all weights are zero
-        if len(sd_list) == 0:
+        # if std dev is 0, then all weights are equal, therefore not good
+        if std_dev == 0:
             continue
-
-        if len(sd_list) == 1:
-            count_good_clusters += 1
-            continue
-
-        # not good if all non-zero weights equal
-        if len(set(sd_list)) == 1:
-            continue
-
-        mean = sum(sd_list)/len(sd_list)
-        sd = np.std(sd_list)
-        if max(sd_list) >= mean + number*sd:
-            count_good_clusters += 1
+        else:
+            z_score_highest = (highest_weight - mean) / std_dev
+            print(z_score_highest)
+            if z_score_highest >= number:
+                count_good_clusters += 1
 
         # add unique_len_c/d to prevent singletons or large domain clusters
     return count_good_clusters + (len(np.unique(domain_labels)) + len(domains_flat)/len(np.unique(domain_labels)))/2
@@ -255,11 +255,10 @@ with open(output_file_clients, 'w') as output:
 edge_list = []
 
 for domain in np.unique(domain_labels):
-    index = 0
     for client in np.unique(client_labels):
         weight = compute_weight(df_domain[df_domain['cluster_label'] == domain], df_clients[df_clients['cluster_label'] == client])
-        index = index+1
-        edge_list.append((domain, client, weight))
+        if weight != 0:
+            edge_list.append((domain, client, weight))
 
 max_weight = float('-inf')
 
@@ -270,32 +269,39 @@ for u, v, weight in edge_list:
 
 count_good_clusters = 0
 all_good_clusters = []
-for item in np.unique(client_labels):
-    sd_list = []
-    for edge in edge_list:
-        # only consider non-zero weights
-        if edge[1] == item and edge[2] != 0:
-            sd_list.append(edge[2])
-    
-    mean = sum(sd_list)/len(sd_list)
-    
-    # skip if all weights are zero
-    if len(sd_list) == 0:
-        continue
 
-    if len(sd_list) == 1:
+df = pd.DataFrame(edge_list, columns=['Domain', 'Client', 'Weight'])
+
+# Group by 'client' column
+client_groups = df.groupby('Client')['Weight']
+
+# Function to calculate standard deviation and other metrics for each client group
+
+for group, weights in client_groups:
+    print("client cluster: " + str(group))
+    print("all weights: " + str(weights))
+    std_dev = np.std(weights)
+    highest_weight = np.max(weights)
+    mean = np.mean(weights)
+    print("np mean: " + str(mean))
+    mean1 = sum(weights)/len(weights)
+    print("manual mean: " + str(mean1))
+    print("std dev: " + str(std_dev))
+    print("highest weight: " + str(highest_weight))
+    print("mean: " + str(mean))
+    if len(weights)<= num_highest_allowed:
         count_good_clusters += 1
-        all_good_clusters.append(item)
+        all_good_clusters.append(group)
+    
+    # if std dev is 0, then all weights are equal, therefore not good
+    if std_dev == 0:
         continue
-
-    # not good if all non-zero weights equal
-    if len(set(sd_list)) == 1:
-        continue
-
-    sd = np.std(sd_list)
-    if max(sd_list) >= mean + number*sd:
-        count_good_clusters += 1
-        all_good_clusters.append(item)
+    else:
+        z_score_highest = (highest_weight - mean) / std_dev
+        print("z_score highest: "+str(z_score_highest))
+        if z_score_highest >= number:
+            count_good_clusters += 1
+            all_good_clusters.append(group)
 
 # visualize as table
 edges_data = pd.DataFrame({'Domain': [edge[0] for edge in edge_list],
@@ -303,10 +309,10 @@ edges_data = pd.DataFrame({'Domain': [edge[0] for edge in edge_list],
                            'Weight': [edge[2] for edge in edge_list],
                            'Weight significance': [edge[2]/max_weight for edge in edge_list]})
 
-data_output = "/home/ihyun/sni_sd_trials/dbscan_custom_result_{:.2f}.json".format(number)
+data_output = "/Users/ihyunnam/Desktop/c_{:.2f}.json".format(number)
 with open(data_output, 'w') as output:
     edges_data.to_json(data_output, orient='records', lines=True)
 
-with open("/home/ihyun/sni_sd_trials/dbscan_custom_info_{:.2f}.json".format(number), 'w') as output:
+with open("/Users/ihyunnam/Desktop/d_{:.2f}.json".format(number), 'w') as output:
     output.write(json.dumps("num good clusters" + str(count_good_clusters)) + '\n')
     output.write(json.dumps("all good clusters" + str(all_good_clusters)) + '\n')
