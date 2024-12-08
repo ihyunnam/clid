@@ -4,7 +4,7 @@ This repository contains the source code for Clid, a Transport Layer Security (T
 ##### (Preprint) Ihyun Nam and Gerry Wan, October 2024 - https://arxiv.org/pdf/2410.02040
 
 ## Navigating the repository
-Run classify_client.py after editing the JSON files at the top of the file to the TLS connections of clients you wish to identify. You can also edit 
+Run classify_client.py after editing the JSON files at the top of the file to the TLS connections of clients you wish to identify. You can also edit `num_highest_allowed' to determine how many top-informative domain names you want to identify for each client.
 
 ## How does Clid work?
 For this research, we utilize some 345 million anonymized TLS handshakes collected from a large university campus network. From each handshake, we create a TCP fingerprint that identifies each unique client that corresponds to a physical device on the network. Clid uses Bayesian optimization to find the 'optimal' DBSCAN clustering of clients and domain names for a set of TLS connections. Clid maps each client cluster to one or more domain clusters that are most strongly associated with it based on the frequency and exclusivity of their TLS connections. While learning highly associated domain names of a client may not immediately tell us specific characteristics of the client like its the operating system, manufacturer, or TLS configuration, it may serve as a strong first step to doing so.
