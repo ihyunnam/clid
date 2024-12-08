@@ -4,9 +4,9 @@ This repository contains the source code for Clid, a Transport Layer Security (T
 ##### (Preprint) Ihyun Nam and Gerry Wan, October 2024 - https://arxiv.org/pdf/2410.02040
 
 ## Navigating the repository
-Run `classify_client.py' after editing the JSON files at the top of the file to the TLS connections of clients you wish to identify. You can also edit `num_highest_allowed' to determine how many top-informative domain names you want to identify for each client.
+Run `classify_client.py` after editing the JSON files at the top of the file to the TLS connections of clients you wish to identify. You can also edit `num_highest_allowed` to determine how many top-informative domain names you want to identify for each client.
 
-Directory `other_clustering' contains files with the client identification algorithm using different clustering methods for domain names (default DBSCAN a.k.a. Euclidean distance and Kmeans). The main `classify_client.py' uses DBSCAN with a custom distnace metric we made for domain names and beget the best results, according to our experiments.
+Directory `other_clustering` contains files with the client identification algorithm using different clustering methods for domain names (default DBSCAN a.k.a. Euclidean distance and Kmeans). The main `classify_client.py` uses DBSCAN with a custom distnace metric we made for domain names and beget the best results, according to our experiments.
 
 Directory `prelim_tests' contains the code for preliminary results showing that prior client identification tools (Joy, Zardaxt, p0f) can only classify few clients.
 
